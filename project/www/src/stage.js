@@ -7,6 +7,10 @@ class Stage {
     // static fallingPuyoList = [];
     // static eraseStartFrame;
     // static erasingPuyoInfoList = [];
+    
+    static isChainMode = false;     // 💡 【追加】現在、連鎖の最中かどうかを記憶するフラグ（初期値はfalse）
+    static chainCount = 0;          // 💡 【追加】現在の連鎖数を記憶する変数
+    static isEffectShown = false;   // 💡 【追加】この連鎖の文字をすでに表示したかを管理するフラグ
 
     static initialize() {
         // HTML からステージの元となる要素を取得し、大きさを設定する
@@ -110,18 +114,32 @@ class Stage {
                 }
             }
         }
+        
+        // 💡 【修正】ここにあった chainCount = 0 などのリセット処理をすべて削除します！
+        if (!isFalling) {
+            this.isChainMode = false; 
+        }
+        
         return isFalling;
     }
+    
     // 自由落下させる
     static fall() {
         let isFalling = false;
+        
+        // 💡 【追加】連鎖モードならゆっくり(4)、ちぎりなら超高速(16)に速度を自動切り替え
+        const currentSpeed = this.isChainMode ? Config.chainFallingSpeed : Config.freeFallingSpeed;
+
         for(const fallingPuyo of this.fallingPuyoList) {
             if(!fallingPuyo.falling) {
                 // すでに自由落下が終わっている
                 continue;
             }
             let position = fallingPuyo.position;
-            position += Config.freeFallingSpeed;
+            
+            // 💡 現在の状態に合わせた速度（currentSpeed）を加算する
+            position += currentSpeed;
+            
             if(position >= fallingPuyo.destination) {
                 // 自由落下終了
                 position = fallingPuyo.destination;
@@ -142,6 +160,13 @@ class Stage {
     static checkErase(startFrame) {
         this.eraseStartFrame = startFrame;
         this.erasingPuyoInfoList.length = 0;
+
+        // 💡 【追加】連鎖モードではない（プレイヤーが操作してちぎり等も終わった）状態で
+        // 新しく checkErase が呼ばれた＝「完全に新しい手番の1連鎖目」なので、ここで連鎖数と文字フラグをリセットする
+        if (!this.isChainMode) {
+            this.chainCount = 0;
+            this.isEffectShown = false;
+        }
 
         // 何色のぷよを消したかを記録する
         const erasedPuyoColor = {};
@@ -184,7 +209,7 @@ class Stage {
             };
         };
         
-// 実際に削除できるかの確認を行う
+        // 実際に削除できるかの確認を行う
         const puyoGroups = []; // 今回同時に消える塊ごとの個数を記録する配列
         for(let y = 0; y < Config.stageRows; y++) {
             for(let x = 0; x < Config.stageCols; x++) {
@@ -211,22 +236,58 @@ class Stage {
         for(const info of existingPuyoInfoList) {
             this.board[info.y][info.x] = info.cell;
         }
-
+    
         if(this.erasingPuyoInfoList.length) {
-            // もし消せるならば、消えるぷよの個数と色の情報、そして個別の塊のリストをまとめて返す
+            
+            this.isChainMode = true;
+
+            // 💡 【修正】条件をこれだけにします（eraseStartFrameの比較を無くしました）
+            // これにより、連鎖中（isChainMode=true）のまま2連鎖目、3連鎖目が始まった瞬間を確実に捉えられます
+            if (!this.isEffectShown) {
+                this.isEffectShown = true; // 重複表示を防止
+                this.chainCount++;         // 連鎖数を進める（1➔2➔3...）
+                
+                // 消えるぷよ全体の中心座標（平均値）を計算
+                let sumX = 0;
+                let sumY = 0;
+                for (const info of this.erasingPuyoInfoList) {
+                    sumX += info.x;
+                    sumY += info.y;
+                }
+                
+                if (this.erasingPuyoInfoList.length > 0) {
+                    const avgX = (sumX / this.erasingPuyoInfoList.length) * Config.puyoImgWidth + (Config.puyoImgWidth / 2);
+                    const avgY = (sumY / this.erasingPuyoInfoList.length) * Config.puyoImgHeight + (Config.puyoImgHeight / 2);
+
+                    // エフェクトを表示
+                    this.showChainEffect(this.chainCount, avgX, avgY);
+                }
+            }
+
+            // ゲームの進行に必要なデータは毎回必ずreturn
             return {
                 piece: this.erasingPuyoInfoList.length,
                 color: Object.keys(erasedPuyoColor).length,
-                puyoGroups: puyoGroups // 塊の配列データを game.js 側へ引き渡す
+                puyoGroups: puyoGroups 
             };
         }
+
+        // 💡 【ここを追加】ぷよが1つも消えなかった＝連鎖が完全に終了した瞬間なので、連鎖モードを終了します
+        this.isChainMode = false;
+        
         return null;
     }
+    
     // 消すアニメーションをする
     static erasing(frame) {
         const elapsedFrame = frame - this.eraseStartFrame;
         const ratio = elapsedFrame / Config.eraseAnimationDuration;
         if(ratio > 1) {
+
+            // 💡 【追加】1つ前の連鎖のアニメーションが完全に終わったので、
+            // 次の連鎖（2連鎖目など）の文字を表示できるようにフラグをクリアする！
+            this.isEffectShown = false;
+
             // アニメーションを終了する
             for(const info of this.erasingPuyoInfoList) {
                 var element = info.cell.element;
@@ -289,6 +350,39 @@ class Stage {
             }
         };
         animation();
+    }
+    
+    // 💡 【修正】画面外へのはみ出しガードの数値を最適化
+    static showChainEffect(count, x, y) {
+        // 表示する要素を作成
+        const effectElement = document.createElement('div');
+        effectElement.className = 'chain-text';
+        effectElement.innerHTML = `<span>${count}</span>れんさ!`;
+        
+        // 💡 【ここを調整】
+        // 文字の横幅（中心から左右に広がる分）を考慮して、ガードの最小値を広げます。
+        // ステージの最大幅を正確に計算し、両端での見切れを100%防ぎます。
+        const stageWidth = Config.puyoImgWidth * Config.stageCols;
+        
+        const minX = 65;               // ◀ 左端のガードを40から65pxに強化（「〇」が見切れるのを防ぐ）
+        const maxX = stageWidth - 75;  // ◀ 右端のガードを「ステージ幅 - 75px」に強化（「さ!」が見切れるのを防ぐ）
+        const minY = 40;               // 上端のガードも少しだけ下に調整
+        
+        // 計算した安全な位置に座標を固定する
+        const posX = Math.max(minX, Math.min(maxX, x));
+        const posY = Math.max(minY, y);
+        
+        // 計算した位置を設定
+        effectElement.style.left = posX + 'px';
+        effectElement.style.top = posY + 'px';
+        
+        // ステージの子要素として画面に追加
+        this.stageElement.appendChild(effectElement);
+        
+        // アニメーション（0.8秒）が終わったら自動で削除
+        setTimeout(() => {
+            effectElement.remove();
+        }, 800);
     }
 }
 Stage.fallingPuyoList = [];
